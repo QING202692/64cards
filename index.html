@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>64 卦 - 网页牌游戏</title>
+<link rel="stylesheet" href="theme.css?v=22">
+</head>
+<body>
+
+<div id="app" v-cloak>
+  <div class="table" @mouseover="onGlobalHover">
+
+    <!-- ===== 顶栏 ===== -->
+    <header class="hud-top">
+      <div class="hud-title panel-ink">
+        <div class="title-main">六十四卦</div>
+        <div class="title-sub">八卦相荡 · 六爻成卦</div>
+      </div>
+
+      <div class="hud-banner panel-ink">
+        <div class="banner-main">第 {{ game.turn }} 回合 · {{ currentName }} 的回合</div>
+        <div class="banner-sub">
+          <span class="banner-chip">阶段 · {{ phaseText }}</span>
+          <span class="banner-chip life" v-if="lifeChainText">同生链：{{ lifeChainText }}</span>
+          <span class="banner-chip death" v-if="deathChainText">共死链：{{ deathChainText }}</span>
+          <span class="banner-chip tip" v-if="pendingTarget">请选择一名玩家作为目标</span>
+          <span class="banner-chip warn" v-else-if="selectedHex !== null && playBlockReason">{{ playBlockReason }}</span>
+          <span class="banner-chip tip" v-else-if="humanShock">你被震卦眩晕，本回合跳过摸牌与行动</span>
+        </div>
+      </div>
+
+      <div class="hud-stats">
+        <div class="stat-box panel-ink"><span class="stat-num">{{ game.deck.length }}</span><span class="stat-label">牌库</span></div>
+        <div class="stat-box panel-ink"><span class="stat-num">{{ game.discard.length }}</span><span class="stat-label">弃牌堆</span></div>
+        <button class="btn-small blue" @click="restart">重开</button>
+      </div>
+    </header>
+
+    <!-- ===== 主体三栏 ===== -->
+    <div class="hud-body">
+
+      <!-- 左栏：自己 + 对手 + 操作（参考图一：所有玩家竖向堆叠） -->
+      <aside class="side side-left">
+        <div class="panel-ink self-card">
+          <player-panel
+            :player="self"
+            :vertical="true"
+            :active="game.currentPlayer === 0"
+            :targetable="pendingTarget"
+            :fx-items="fxMap[0] || []"
+            :shake="shakeMap[0] || ''"
+            @pick="onPickTarget(0)"
+          ></player-panel>
+        </div>
+        <div class="rivals-vert">
+          <player-panel
+            v-for="p in rivals"
+            :key="p.id"
+            :player="p"
+            :active="game.currentPlayer === p.id"
+            :targetable="pendingTarget && p.alive"
+            :fx-items="fxMap[p.id] || []"
+            :shake="shakeMap[p.id] || ''"
+            @pick="onPickTarget"
+          ></player-panel>
+        </div>
+        <div class="action-stack">
+          <button class="banner-btn green" :disabled="!isHumanTurn || pendingTarget" @click="onPlay">
+            <span class="btn-text">出　牌</span>
+          </button>
+          <button class="banner-btn purple" :disabled="!isHumanTurn" @click="onEndTurn">
+            <span class="btn-text">结束回合</span>
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h14M13 5l7 7-7 7" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </aside>
+
+      <!-- 中栏：64卦牌区 / 组卦槽 / 八卦手牌 -->
+      <main class="stage">
+        <!-- 64卦牌区（预组好的卦牌） -->
+        <section class="hex-zone">
+          <div class="zone-head">
+            <span class="zone-title">六 十 四 卦 牌 区</span>
+            <span class="zone-hint">存活随时可组 · 左键选牌出牌 · 右键拆回八卦</span>
+          </div>
+          <div class="hex-row">
+            <hex-mini-card
+              v-for="(c, i) in self.hexCards"
+              :key="i"
+              :card="c"
+              :index="i"
+              :selected="selectedHex === i"
+              @pick="pickHex"
+              @split="splitHex"
+              @hover="onHexHover"
+            ></hex-mini-card>
+            <div v-if="!self.hexCards.length" class="hex-empty">尚 未 组 卦 · 从 下 方 选 两 张 八 卦</div>
+          </div>
+        </section>
+
+        <!-- 组卦槽 -->
+        <section class="combine-bar">
+          <div class="slot" @click="clearCombine">
+            <span v-if="!slots[0]" class="slot-label">上卦</span>
+            <span v-else v-html="trigramYaoHTML(slots[0])"></span>
+          </div>
+          <span class="combine-op">＋</span>
+          <div class="slot" @click="clearCombine">
+            <span v-if="!slots[1]" class="slot-label">下卦</span>
+            <span v-else v-html="trigramYaoHTML(slots[1])"></span>
+          </div>
+          <span class="combine-op">＝</span>
+          <div class="combine-preview">
+            <hex-mini-card v-if="previewCombined" :card="previewCombined" preview @commit="commitCombine" @hover="onHexHover"></hex-mini-card>
+            <div v-else class="mini-empty">预览</div>
+          </div>
+          <button class="commit-btn teal" :disabled="!previewCombined" @click="commitCombine">
+            <span class="btn-text">组　卦</span>
+            <svg class="btn-icon circle" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="rgba(255,255,255,0.18)"/>
+              <path d="M9 12h6M13 8l4 4-4 4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </section>
+
+        <!-- 八卦牌区（手牌） -->
+        <section class="hand-zone">
+          <div class="hand-head">八 卦 牌 区</div>
+          <div class="hand-row">
+            <hand-card
+              v-for="(card, idx) in self.hand"
+              :key="idx"
+              :card="card"
+              :index="idx"
+              :total="self.hand.length"
+              :selected="selected.includes(idx)"
+              :disabled="!canInteract"
+              @pick="toggleCard"
+            ></hand-card>
+          </div>
+        </section>
+      </main>
+
+      <!-- 右栏：战报 -->
+      <aside class="side side-right">
+        <div class="panel-ink log-panel">
+          <div class="log-title">战　报</div>
+          <div class="log-list" ref="logBox">
+            <div v-for="(item, i) in game.log" :key="i" class="log-item">{{ item }}</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- ===== 胜负遮罩 ===== -->
+    <div class="overlay" v-if="game.gameOver">
+      <div class="overlay-box">
+        <div class="overlay-title">
+          {{ game.winner === 0 ? '胜' : (game.winner === 'sameLife' ? '同生' : (game.winner === 'sameDeath' ? '共死' : (game.winner === 'none' ? '平局' : '败'))) }}
+        </div>
+        <div class="overlay-sub">
+          {{ game.winner === 0 ? '天命所归，乾坤定矣'
+            : game.winner === 'sameLife' ? '天下归心，安居乐业'
+            : game.winner === 'sameDeath' ? '生灵涂炭，同归于尽'
+            : game.winner === 'none' ? '众生皆寂'
+            : players[game.winner].name + ' 终成赢家' }}
+        </div>
+        <button class="banner-btn green center" @click="restart">再来一局</button>
+      </div>
+    </div>
+
+    <!-- ===== 悬停大卡牌 tooltip（根级 fixed 居中） ===== -->
+    <div class="hex-tip-overlay" v-if="hoveredHex">
+      <hex-card :upper="hoveredHex.originalUpper" :lower="hoveredHex.originalLower"></hex-card>
+    </div>
+
+  </div>
+</div>
+
+<script src="vendor/vue.global.prod.js"></script>
+<script src="data.js?v=20"></script>
+<script src="game.js?v=20"></script>
+<script src="ai.js?v=20"></script>
+<script src="app.js?v=21"></script>
+<audio src="cornist-chinese-zen-487436.mp3" autoplay loop></audio>
+</body>
+</html>
